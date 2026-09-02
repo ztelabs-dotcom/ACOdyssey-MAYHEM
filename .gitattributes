@@ -1,9 +1,8 @@
-* text=auto
-*.md text eol=lf
-*.ps1 text eol=lf
-*.json text eol=lf
 *.cs text eol=lf
 *.csproj text eol=lf
+src/ACOdysseyUMM/patches.json text eol=crlf
+*.md text eol=lf
+*.ps1 text eol=lf
 *.png binary
 *.wav binary
 *.ico binary
