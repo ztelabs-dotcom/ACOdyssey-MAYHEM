@@ -51,6 +51,8 @@ Embedded project resources:
 - installer audio
 - application icon
 
+The artwork, audio/music and icon assets are original works owned by Narzelith. Their presence in this public review repository does not grant redistribution or reuse rights. See `ASSET_RIGHTS.md`.
+
 ## Security behavior
 
 The hardened public build has no runtime networking, updater, telemetry, registry access, shell invocation, process launching, P/Invoke/native interop, or third-party executable extraction. It only inspects the process list for `ACOdyssey.exe` so it can refuse writes while the game is running.

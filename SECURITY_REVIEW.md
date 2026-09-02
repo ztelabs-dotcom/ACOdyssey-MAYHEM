@@ -84,8 +84,10 @@ Application-authored/project resources compiled into the executable:
 
 - `patches.json`;
 - installer artwork;
-- installer audio;
+- installer audio/music;
 - application icon.
+
+The artwork, audio/music and icon assets are original works owned by Narzelith and are not third-party redistributables. All rights are reserved; see `ASSET_RIGHTS.md`.
 
 No Ubisoft executable or complete proprietary game package is embedded.
 
