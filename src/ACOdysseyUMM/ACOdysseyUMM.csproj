@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>aco_mayhem_installer</AssemblyName>
+    <RootNamespace>ACOdysseyUMM</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
+    <AssemblyTitle>MAYHEM - Assassin's Creed Odyssey Installer</AssemblyTitle>
+    <Product>MAYHEM - Assassin's Creed Odyssey</Product>
+    <Description>MAYHEM installer and binary patch manager for Assassin's Creed Odyssey.</Description>
+    <Company>Narzelith</Company>
+    <Authors>Narzelith</Authors>
+    <Copyright>Copyright (c) 2026 Narzelith</Copyright>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <ApplicationIcon>Assets\Mayhem.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Public release resources are compiled into the application. -->
+    <None Remove="patches.json" />
+    <None Remove="Assets\InstallerArt.png" />
+    <None Remove="Assets\InstallerAudio.wav" />
+    <None Remove="Assets\Mayhem.ico" />
+    <EmbeddedResource Include="patches.json" LogicalName="ACOdysseyUMM.Resources.patches.json" />
+    <EmbeddedResource Include="Assets\InstallerArt.png" LogicalName="ACOdysseyUMM.Resources.InstallerArt.png" />
+    <EmbeddedResource Include="Assets\InstallerAudio.wav" LogicalName="ACOdysseyUMM.Resources.InstallerAudio.wav" />
+    <EmbeddedResource Include="Assets\Mayhem.ico" LogicalName="ACOdysseyUMM.Resources.Mayhem.ico" />
+  </ItemGroup>
+</Project>
