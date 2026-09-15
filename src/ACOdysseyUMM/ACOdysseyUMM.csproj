@@ -7,10 +7,10 @@
     <Nullable>enable</Nullable>
     <AssemblyName>aco_mayhem_installer</AssemblyName>
     <RootNamespace>ACOdysseyUMM</RootNamespace>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
-    <InformationalVersion>1.0.0</InformationalVersion>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <InformationalVersion>1.1.0</InformationalVersion>
     <AssemblyTitle>MAYHEM - Assassin's Creed Odyssey Installer</AssemblyTitle>
     <Product>MAYHEM - Assassin's Creed Odyssey</Product>
     <Description>MAYHEM installer and binary patch manager for Assassin's Creed Odyssey.</Description>
@@ -28,7 +28,9 @@
     <None Remove="Assets\InstallerArt.png" />
     <None Remove="Assets\InstallerAudio.wav" />
     <None Remove="Assets\Mayhem.ico" />
+    <None Remove="Assets\forge-levels255-v1.mfd.br" />
     <EmbeddedResource Include="patches.json" LogicalName="ACOdysseyUMM.Resources.patches.json" />
+    <EmbeddedResource Include="Assets\forge-levels255-v1.mfd.br" LogicalName="ACOdysseyUMM.Resources.forge-levels255-v1.mfd.br" />
     <EmbeddedResource Include="Assets\InstallerArt.png" LogicalName="ACOdysseyUMM.Resources.InstallerArt.png" />
     <EmbeddedResource Include="Assets\InstallerAudio.wav" LogicalName="ACOdysseyUMM.Resources.InstallerAudio.wav" />
     <EmbeddedResource Include="Assets\Mayhem.ico" LogicalName="ACOdysseyUMM.Resources.Mayhem.ico" />

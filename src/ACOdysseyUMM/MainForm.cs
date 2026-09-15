@@ -12,6 +12,7 @@ internal sealed class MainForm : Form
 
     private readonly PatchManifest _manifest;
     private PatchEngine _engine;
+    private ForgeLevel255Manager _forgeManager;
     private readonly Image _installerArt;
     private readonly MemoryStream _installerAudioStream;
     private readonly System.Media.SoundPlayer _installerAudioPlayer;
@@ -74,6 +75,7 @@ internal sealed class MainForm : Form
     private TargetAnalysis? _analysis;
     private BackupStorageMode _backupStorageMode;
     private bool _busy;
+    private bool _forgePairValid;
     private bool _audioEnabled = true;
     private bool _dragging;
     private Point _dragOffset;
@@ -106,6 +108,7 @@ internal sealed class MainForm : Form
             _manifest = PatchEngine.LoadManifest();
             _backupStorageMode = DetectInitialBackupStorageMode();
             _engine = CreateEngine(_backupStorageMode);
+            _forgeManager = CreateForgeManager(_backupStorageMode);
         }
         catch (Exception ex)
         {
@@ -566,12 +569,14 @@ internal sealed class MainForm : Form
 
     private static bool StorageHasRecoveryArtifacts(string root) =>
         File.Exists(Path.Combine(root, "umm-state.json")) ||
-        File.Exists(Path.Combine(root, "umm-transaction.json"));
+        File.Exists(Path.Combine(root, "umm-transaction.json")) ||
+        File.Exists(Path.Combine(root, "mayhem-forge-state.json")) ||
+        File.Exists(Path.Combine(root, "mayhem-forge-transaction.json"));
 
     private static DateTime LatestStorageArtifactUtc(string root)
     {
         var latest = DateTime.MinValue;
-        foreach (var fileName in new[] { "umm-state.json", "umm-transaction.json" })
+        foreach (var fileName in new[] { "umm-state.json", "umm-transaction.json", "mayhem-forge-state.json", "mayhem-forge-transaction.json" })
         {
             var path = Path.Combine(root, fileName);
             if (File.Exists(path))
@@ -603,6 +608,13 @@ internal sealed class MainForm : Form
     {
         BackupStorageMode.AppData => new PatchEngine(_manifest, AppDataStorageRoot()),
         BackupStorageMode.Installer => new PatchEngine(_manifest, InstallerStorageRoot(), InstallerStorageRoot()),
+        _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown backup storage mode.")
+    };
+
+    private static ForgeLevel255Manager CreateForgeManager(BackupStorageMode mode) => mode switch
+    {
+        BackupStorageMode.AppData => new ForgeLevel255Manager(AppDataStorageRoot(), Path.Combine(AppDataStorageRoot(), "Backups")),
+        BackupStorageMode.Installer => new ForgeLevel255Manager(InstallerStorageRoot(), InstallerStorageRoot()),
         _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown backup storage mode.")
     };
 
@@ -651,8 +663,10 @@ internal sealed class MainForm : Form
         try
         {
             var nextEngine = CreateEngine(next);
+            var nextForgeManager = CreateForgeManager(next);
             _backupStorageMode = next;
             _engine = nextEngine;
+            _forgeManager = nextForgeManager;
             UpdateBackupStoreVisual();
             InvalidateAnalysisAfterBackupStoreChange();
             Log($"Backup store: {_backupStorageMode}; vanilla backup root: {CurrentBackupDirectory()}");
@@ -782,11 +796,20 @@ internal sealed class MainForm : Form
         SetBusy(true);
         try
         {
-            var result = await _engine.VerifyAsync(_exePath.Text.Trim());
+            var targetPath = _exePath.Text.Trim();
+            var result = await _engine.VerifyAsync(targetPath);
+            var forgeResult = await _forgeManager.VerifyPairAsync(targetPath);
             Log(result.Status);
             Log($"EXE SHA-256: {result.Sha256}; operations verified: {result.VerifiedOperationCount}");
             if (!string.IsNullOrWhiteSpace(result.BackupPath))
-                Log($"Original backup: {result.BackupPath}");
+                Log($"Original EXE backup: {result.BackupPath}");
+            Log(forgeResult.Status);
+            if (!string.IsNullOrWhiteSpace(forgeResult.Sha256))
+                Log($"Forge SHA-256: {forgeResult.Sha256}");
+            if (!string.IsNullOrWhiteSpace(forgeResult.BackupPath))
+                Log($"Original Forge backup: {forgeResult.BackupPath}");
+            if (!result.IsValid || !forgeResult.IsValid)
+                MessageBox.Show("MAYHEM verification failed. Check the installer log for the exact EXE/Forge mismatch.", "Verify failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             await RefreshAnalysisCoreAsync();
         }
         catch (Exception ex)
@@ -804,20 +827,33 @@ internal sealed class MainForm : Form
     {
         try
         {
-            _analysis = await _engine.AnalyzeAsync(_exePath.Text.Trim());
+            var targetPath = _exePath.Text.Trim();
+            await _forgeManager.RecoverInterruptedAsync(targetPath, _engine);
+            _analysis = await _engine.AnalyzeAsync(targetPath);
             _buildValue.Text = _analysis.Build?.DisplayName ?? (_analysis.MatchesSavedPatchedState ? "MAYHEM patched" : "Unknown");
             _hashValue.Text = _analysis.Sha256.Length >= 12 ? _analysis.Sha256[..12] + "..." : _analysis.Sha256;
             _statusValue.Text = _analysis.Status;
             _statusValue.ForeColor = _analysis.HasStateConflict ? Color.FromArgb(227, 105, 105) : Color.FromArgb(214, 205, 198);
             ValidatePublishedModuleSet(_analysis);
+            var forgeResult = await _forgeManager.VerifyPairAsync(targetPath);
+            _forgePairValid = forgeResult.IsValid;
+            if (!forgeResult.IsValid)
+            {
+                _statusValue.Text = forgeResult.Status;
+                _statusValue.ForeColor = Color.FromArgb(227, 105, 105);
+            }
             Log($"Analyzed: {_analysis.Path}");
-            Log($"SHA-256: {_analysis.Sha256}");
+            Log($"EXE SHA-256: {_analysis.Sha256}");
             Log($"PE timestamp: 0x{_analysis.PeTimestamp:X8}; size: {_analysis.Size:N0} bytes");
             Log(_analysis.Status);
+            Log(forgeResult.Status);
+            if (!string.IsNullOrWhiteSpace(forgeResult.Sha256))
+                Log($"Forge SHA-256: {forgeResult.Sha256}");
         }
         catch (Exception ex)
         {
             _analysis = null;
+            _forgePairValid = false;
             _buildValue.Text = "Error";
             _hashValue.Text = "-";
             _statusValue.Text = ex.Message;
@@ -889,11 +925,21 @@ internal sealed class MainForm : Form
         {
             Log("Resolved selection: " + description);
             Log("Low-level patch variants: " + string.Join(", ", selected));
-            Log("Preflight + backup + staging patch started.");
-            var state = await _engine.ApplyAsync(_analysis, selected);
+            Log(ForgeLevel255Manager.RequiresExtendedStats(selected)
+                ? "Preflight + EXE/Forge backup + staged 255-stat Forge reconstruction started."
+                : "Preflight + EXE backup started; Level Unlock Off requires exact vanilla Forge.");
+            var state = await _forgeManager.ApplyCoordinatedAsync(_engine, _analysis, selected);
+            var forgeResult = await _forgeManager.VerifyPairAsync(_analysis.Path);
+            if (!forgeResult.IsValid)
+                throw new InvalidDataException("Post-install Forge verification failed: " + forgeResult.Status);
             Log($"Installed: {string.Join(", ", state.AppliedPatchIds)}");
-            Log($"Patched SHA-256: {state.PatchedSha256}");
-            Log($"Original backup: {state.BackupPath}");
+            Log($"Patched EXE SHA-256: {state.PatchedSha256}");
+            Log($"Original EXE backup: {state.BackupPath}");
+            Log(forgeResult.Status);
+            if (!string.IsNullOrWhiteSpace(forgeResult.Sha256))
+                Log($"Forge SHA-256: {forgeResult.Sha256}");
+            if (!string.IsNullOrWhiteSpace(forgeResult.BackupPath))
+                Log($"Original Forge backup: {forgeResult.BackupPath}");
             await RefreshAnalysisCoreAsync();
         }
         catch (Exception ex)
@@ -912,7 +958,7 @@ internal sealed class MainForm : Form
         if (_busy || _analysis is null) return;
         if (MessageBox.Show(
                 this,
-                "Restore the exact hash-verified original ACOdyssey.exe backup and remove the installed MAYHEM EXE patch?",
+                "Restore the exact hash-verified vanilla ACOdyssey.exe and DataPC_patch_01.forge backups used by the installed MAYHEM configuration?",
                 "Restore vanilla",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,
@@ -922,8 +968,12 @@ internal sealed class MainForm : Form
         SetBusy(true);
         try
         {
-            await _engine.RestoreAsync(_analysis.Path);
-            Log("Vanilla executable restored and SHA-256 verified.");
+            await _forgeManager.RestoreCoordinatedAsync(_engine, _analysis.Path);
+            var forgeResult = await _forgeManager.VerifyPairAsync(_analysis.Path);
+            if (!forgeResult.IsValid || forgeResult.IsPatched)
+                throw new InvalidDataException("Post-restore Forge verification failed: " + forgeResult.Status);
+            Log("Vanilla executable and Forge state restored and SHA-256 verified.");
+            Log(forgeResult.Status);
             await RefreshAnalysisCoreAsync();
         }
         catch (Exception ex)
@@ -941,6 +991,7 @@ internal sealed class MainForm : Form
     {
         if (_busy) return;
         _analysis = null;
+        _forgePairValid = false;
         _buildValue.Text = "Not analyzed";
         _hashValue.Text = "-";
         _statusValue.Text = "Target path changed. Analyze again.";
@@ -953,6 +1004,7 @@ internal sealed class MainForm : Form
     {
         if (_busy) return;
         _analysis = null;
+        _forgePairValid = false;
         _buildValue.Text = "Not analyzed";
         _hashValue.Text = "-";
         _statusValue.Text = $"Backup store: {_backupStorageMode}. Analyze again.";
@@ -965,7 +1017,7 @@ internal sealed class MainForm : Form
     {
         var selectedCount = ResolveCurrentPatchIds().Count;
         _verifyButton.Enabled = !_busy && _analysis is not null;
-        _applyButton.Enabled = !_busy && _analysis?.Build is not null && _analysis.HasStateConflict == false && selectedCount > 0;
+        _applyButton.Enabled = !_busy && _forgePairValid && _analysis?.Build is not null && _analysis.HasStateConflict == false && selectedCount > 0;
         _restoreButton.Enabled = !_busy && _analysis is not null && _analysis.MatchesSavedPatchedState;
     }
 

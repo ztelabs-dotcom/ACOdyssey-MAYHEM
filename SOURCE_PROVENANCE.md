@@ -1,79 +1,98 @@
 # Source and artifact provenance
 
-Date: 2026-09-02
+Date: 2026-09-15
 
-## Existing release control artifact
+## MAYHEM 1.0 review baseline
 
-Path at audit time:
+The 1.1 public-review tree was derived from the exact previously approved MAYHEM 1.0 Nexus review repository state:
 
-`F:\Workspace\MODDING\ACO\Release\installer\MAHYEM - Steam-1.5.6-build\aco_mayhem_installer.exe`
+- commit: `704d704acf4b08561da782601def23096b98db60`
+- tag: `mayhem-1.0.0-nexus-review-20260902-r3`
+- 1.0 review executable SHA-256: `E7D5568DAE4D231F53FB5B116E99AA1CC972B077EE8DA3936AD541DA39FBB6F9`
+
+The 1.0 repository was copied into a separate `MAYHEM-1.1.0` review workspace before any 1.1 change. The approved 1.0 repository itself was not modified.
+
+## Intentional 1.1 source delta
+
+The gameplay EXE patch manifest and existing patch engine remain unchanged.
+
+Intentional runtime changes for 1.1 are limited to:
+
+- `src/ACOdysseyUMM/ACOdysseyUMM.csproj`: version `1.1.0` and embedded Forge delta resource;
+- `src/ACOdysseyUMM/MainForm.cs`: coordinated Forge verification/apply/restore integration;
+- `src/ACOdysseyUMM/ForgeLevel255Manager.cs`: deterministic local Forge reconstruction, validation, backup, recovery and restore logic;
+- `src/ACOdysseyUMM/InternalsVisibleTo.cs`: test visibility only;
+- `src/ACOdysseyUMM/Assets/forge-levels255-v1.mfd.br`: frozen deterministic Forge delta.
+
+The existing `patches.json`, `PatchEngine.cs`, gameplay selection code, installer artwork/audio and application icon were not intentionally changed for the 1.1 feature fix.
+
+## Why the Forge layer was added
+
+MAYHEM 1.0 correctly allowed Mercenary levels above 99 in the executable-level hierarchy/selector path, but the game's EnemyRankInfo progression vectors in `DataPC_patch_01.forge` remained at the vanilla 99-record length.
+
+The game's level-based lookup clamps an index to the available record count. Therefore levels above 99 still consumed the level-99 stat record when the Forge remained vanilla.
+
+The 1.1 Forge output extends the relevant EnemyRankInfo progression data to 255 records so the existing game lookup can select distinct records for levels 100 through 255.
+
+## Forge generation provenance
+
+The canonical modified Forge was generated during development from the user's exact supported vanilla archive using 233 validated EnemyRankInfo replacements.
+
+Batch validation results:
+
+- generated replacements: `233/233 PASS`
+- serialized/mutation round trips: `233/233 PASS`
+- relevant Mercenary RankInfo profiles included: 24
+
+Canonical vanilla Forge:
+
+- size: `3259897607` bytes
+- SHA-256: `9E6F14A85B64B4C39683786D50794A714F50DDDCB343B9312A728806AF468D0E`
+
+Canonical 255-stat Forge:
+
+- size: `3260776448` bytes
+- SHA-256: `D80B46495C6669DF2BCB2CA674227F8FB646A0BE196502C22770CCB5CB6984AF`
+
+A compact deterministic COPY/LITERAL delta was generated between those two exact file identities and Brotli-compressed for embedding:
+
+- file: `forge-levels255-v1.mfd.br`
+- size: `3896382` bytes
+- SHA-256: `6771FA43AA0DBEEBE3D9E87448E86EE1C1C18A1096780B4431D49743A34D28CC`
+
+Independent delta verification reconstructed the canonical target Forge from the canonical vanilla Forge and reproduced the exact `D80B4649...` SHA-256.
+
+The release installer contains only this compact delta, not either complete Ubisoft Forge archive and not the development Forge-builder toolchain.
+
+## Installer integration validation
+
+Before preparing the public review tree, the 1.1 implementation was exercised on isolated copies of the canonical vanilla `ACOdyssey.exe` and `DataPC_patch_01.forge`.
+
+Results:
+
+- all 12 published option combinations: Apply / Verify / Restore PASS;
+- all Light/Linear combinations produced the exact `D80B4649...` extended Forge;
+- all Off combinations required/retained the exact vanilla `9E6F14A8...` Forge;
+- every Restore returned the EXE and Forge copies to their exact vanilla SHA-256 identities;
+- existing EXE patch output identities remained equal to the previously validated patch outputs;
+- no undeclared EXE bytes changed;
+- explicit MAYHEM 1.0 Level Unlock migration test passed: legacy patched EXE + vanilla Forge -> 1.1 Restore -> exact vanilla pair -> 1.1 Linear Apply -> extended Forge -> Restore -> exact vanilla pair.
+
+The currently available machine does not have the full game installed, so the 1.1 build cannot additionally be launched into a live Odyssey gameplay session at review-preparation time. File-level integration and the stat-data path were verified independently.
+
+## Final 1.1 review artifact
+
+Filename:
+
+`aco_mayhem_installer.exe`
 
 Identity:
 
-- size: `89825327` bytes
-- SHA-256: `9EEF79BFE57AA657FE8070763867E74FD888214558BCB392961A8984ADB219AD`
+- size: `183910389` bytes
+- SHA-256: `AD13D7543CC503C25B3AAA200E03178B58F27CAFAEF6B1A327834CFB8D78A739`
+- FileVersion: `1.1.0.0`
+- ProductVersion: `1.1.0`
 
-The existing release executable was copied to the isolated review tree and marked read-only before reconstruction work.
+A separate reconstruction from the isolated public-review source produced the same byte length and SHA-256 as the release candidate.
 
-## Control-source reconstruction proof
-
-The current installer source was combined with the preserved release assets from the August 31 backup and the preserved deterministic icon-generation source/script.
-
-The reconstructed build used:
-
-```powershell
-dotnet publish .\ACOdysseyUMM.csproj `
-  -c Release `
-  -r win-x64 `
-  --self-contained true `
-  -p:PublishSingleFile=true `
-  -p:IncludeNativeLibrariesForSelfExtract=true `
-  -p:EnableCompressionInSingleFile=true `
-  -p:DebugType=none `
-  -p:DebugSymbols=false `
-  -p:IncludeSourceRevisionInInformationalVersion=false
-```
-
-Result:
-
-- reconstructed size: `89825327` bytes
-- reconstructed SHA-256: `9EEF79BFE57AA657FE8070763867E74FD888214558BCB392961A8984ADB219AD`
-- `MATCH_CONTROL=True`
-
-This proves the recovered source/build inputs reproduce the existing release artifact byte-for-byte.
-
-## Hardened public-review delta
-
-A new public-review candidate was then derived from that byte-proven source.
-
-Intentional changes only:
-
-1. Single-file compression disabled.
-2. Meaningful PE product/company/version metadata added.
-3. Assembly/output name changed to `aco_mayhem_installer`.
-4. `NpcLevels255Coordinator.cs` omitted from the public GUI source/build because it is unreachable from `MainForm.cs`, `Program.cs` and the release `patches.json` and would otherwise leave dormant Forge-builder `Process.Start` code in the public executable.
-
-No patch manifest, gameplay patch bytes, GUI behavior source, patch-engine source, artwork, audio or application icon content changed.
-
-Automated common-file hash comparison result:
-
-`UNCHANGED_ALL_COMMON_SOURCE_AND_RESOURCE_FILES=TRUE`
-
-Key frozen hashes:
-
-- `patches.json`: `CD3360C83172AD3B48F50010606F2F905FE4B6C38F594A73D414960615387CE9`
-- `MainForm.cs`: `0DE178ED492D965564A7278C5D75A19209189E8D6C05626932B3A7D9C3BB800B`
-- `PatchEngine.cs`: `970C41073D7244AFF31AF29E4319CF019C1CCCBD862B564104359CCA85334023`
-- `MercenaryInstallSelection.cs`: `5E29F9394B7D7E8C3F5AEE3495A7A7038D89ADABD0CCFC94C4D26C131D58F463`
-- `NightmareScalingPolicy.cs`: `93B7A805A0A6FA1A2F6101F40A6E4C33001155762A7376C94E4D82DBEAEBD942`
-- `InstallerArt.png`: `8F4611FCF34BF92323C0DEA9AE55BE693EFC391830C1C8A7683B92FAE9DC625F`
-- `InstallerAudio.wav`: `3170BCD81EEB6DF9A54EFAC13E033FF67E84D419B9C495085474E78EDC6D7515`
-- `Mayhem.ico`: `14E23A8DECCCF8F63F93CAE9C4720ED2492F28AB17785C317A620375AC6A04C3`
-
-## Hardened review artifact
-
-- filename: `aco_mayhem_installer.exe`
-- size: `179970037` bytes
-- SHA-256: `E7D5568DAE4D231F53FB5B116E99AA1CC972B077EE8DA3936AD541DA39FBB6F9`
-
-The final Git fresh-clone reproduction result and exact commit/tag are recorded outside the repository after the repository is frozen, because a Git commit cannot contain its own final commit hash without changing that hash.
+The final Git commit and 1.1 review tag are recorded after the repository is frozen, because a commit cannot contain its own final commit SHA without changing that SHA.

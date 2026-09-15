@@ -1,8 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
 $ExpectedSdk = '9.0.308'
-$ExpectedSize = 179970037
-$ExpectedSha256 = 'E7D5568DAE4D231F53FB5B116E99AA1CC972B077EE8DA3936AD541DA39FBB6F9'
+$ExpectedSize = 183910389
+$ExpectedSha256 = 'AD13D7543CC503C25B3AAA200E03178B58F27CAFAEF6B1A327834CFB8D78A739'
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Project = Join-Path $RepoRoot 'src\ACOdysseyUMM\ACOdysseyUMM.csproj'
@@ -14,10 +14,9 @@ if ($sdk -ne $ExpectedSdk) {
     throw "Exact .NET SDK $ExpectedSdk is required; active SDK is $sdk."
 }
 
-if (Test-Path $Artifacts) {
-    Remove-Item $Artifacts -Recurse -Force
+if (-not (Test-Path $Artifacts)) {
+    New-Item -ItemType Directory -Path $Artifacts | Out-Null
 }
-New-Item -ItemType Directory -Path $Artifacts | Out-Null
 
 & dotnet publish $Project `
     -c Release `
