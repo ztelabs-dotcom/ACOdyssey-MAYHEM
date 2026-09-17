@@ -1,8 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
 $ExpectedSdk = '9.0.308'
-$ExpectedSize = 183910389
-$ExpectedSha256 = 'AD13D7543CC503C25B3AAA200E03178B58F27CAFAEF6B1A327834CFB8D78A739'
+$ExpectedSize = 183988213
+$ExpectedSha256 = '1869444DF95194510C268D7F25247488F90FFE4B4EED85B40A32198115181927'
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Project = Join-Path $RepoRoot 'src\ACOdysseyUMM\ACOdysseyUMM.csproj'

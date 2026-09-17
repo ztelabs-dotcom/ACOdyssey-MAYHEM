@@ -7,10 +7,10 @@
     <Nullable>enable</Nullable>
     <AssemblyName>aco_mayhem_installer</AssemblyName>
     <RootNamespace>ACOdysseyUMM</RootNamespace>
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
-    <InformationalVersion>1.1.0</InformationalVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
+    <InformationalVersion>1.2.0</InformationalVersion>
     <AssemblyTitle>MAYHEM - Assassin's Creed Odyssey Installer</AssemblyTitle>
     <Product>MAYHEM - Assassin's Creed Odyssey</Product>
     <Description>MAYHEM installer and binary patch manager for Assassin's Creed Odyssey.</Description>

@@ -35,7 +35,7 @@ dotnet publish .\src\ACOdysseyUMM\ACOdysseyUMM.csproj `
   -o .\artifacts
 ```
 
-`IncludeSourceRevisionInInformationalVersion=false` prevents the SDK from injecting the current Git commit into the assembly metadata, so the same frozen source produces the same review artifact regardless of clone revision metadata.
+`IncludeSourceRevisionInInformationalVersion=false` prevents the SDK from injecting the current Git commit into assembly metadata, so the same frozen source can reproduce the same review artifact regardless of clone revision metadata.
 
 ## Expected output
 
@@ -46,16 +46,23 @@ artifacts\aco_mayhem_installer.exe
 Expected size:
 
 ```text
-183910389 bytes
+183988213 bytes
 ```
 
 Expected SHA-256:
 
 ```text
-AD13D7543CC503C25B3AAA200E03178B58F27CAFAEF6B1A327834CFB8D78A739
+1869444DF95194510C268D7F25247488F90FFE4B4EED85B40A32198115181927
 ```
 
-`build-review.ps1` verifies both values and prints:
+Expected PE product metadata:
+
+```text
+FileVersion:    1.2.0.0
+ProductVersion: 1.2.0
+```
+
+`build-review.ps1` verifies byte length and SHA-256 and prints:
 
 ```text
 MATCH_REVIEW_ARTIFACT=True
@@ -65,17 +72,17 @@ only when both match.
 
 ## Clean-clone verification procedure
 
-1. Clone the exact Nexus review tag into a new empty directory.
+1. Clone the exact MAYHEM 1.2 Nexus review tag into a new empty directory.
 2. Confirm `dotnet --version` resolves to `9.0.308`.
 3. Run only `build-review.ps1`.
 4. Confirm the script prints the expected size and SHA-256.
 5. Confirm `MATCH_REVIEW_ARTIFACT=True`.
 
-Do not copy old `bin`, `obj`, publish output, or a prebuilt installer into the clone.
+Do not copy old `bin`, `obj`, publish output or a prebuilt installer into the clone.
 
-## MAYHEM 1.1 Forge payload
+## MAYHEM Forge payload
 
-MAYHEM 1.1 adds one embedded project-authored binary delta:
+MAYHEM 1.2 reuses the exact same embedded project-authored binary delta as the frozen 1.1 review build:
 
 ```text
 src\ACOdysseyUMM\Assets\forge-levels255-v1.mfd.br
@@ -98,7 +105,9 @@ Expected reconstructed Forge:
 - size: `3260776448` bytes
 - SHA-256: `D80B46495C6669DF2BCB2CA674227F8FB646A0BE196502C22770CCB5CB6984AF`
 
-The delta itself contains source/target size and SHA-256 identities. The runtime also independently validates the embedded delta hash and both Forge identities before commit.
+The same source Forge identity is used by the supported Steam and Ubisoft Connect builds.
+
+The delta itself contains source/target size and SHA-256 identities. Runtime code independently validates the embedded delta identity, source Forge identity and staged/committed Forge output identities.
 
 ## Application icon provenance
 

@@ -13,6 +13,7 @@ internal sealed class MainForm : Form
     private readonly PatchManifest _manifest;
     private PatchEngine _engine;
     private ForgeLevel255Manager _forgeManager;
+    private UbisoftDualExeManager _ubisoftManager;
     private readonly Image _installerArt;
     private readonly MemoryStream _installerAudioStream;
     private readonly System.Media.SoundPlayer _installerAudioPlayer;
@@ -71,11 +72,14 @@ internal sealed class MainForm : Form
     private readonly Button _closeButton = new() { Text = "×" };
     private readonly RichTextBox _log = new();
     private readonly ToolTip _toolTip = new();
+    private readonly ThinProgressLine _installProgress = new();
 
     private TargetAnalysis? _analysis;
+    private UbisoftSecondaryAnalysis? _secondaryAnalysis;
     private BackupStorageMode _backupStorageMode;
     private bool _busy;
     private bool _forgePairValid;
+    private bool _secondaryPairValid = true;
     private bool _audioEnabled = true;
     private bool _dragging;
     private Point _dragOffset;
@@ -109,6 +113,7 @@ internal sealed class MainForm : Form
             _backupStorageMode = DetectInitialBackupStorageMode();
             _engine = CreateEngine(_backupStorageMode);
             _forgeManager = CreateForgeManager(_backupStorageMode);
+            _ubisoftManager = CreateUbisoftManager(_backupStorageMode);
         }
         catch (Exception ex)
         {
@@ -263,9 +268,31 @@ internal sealed class MainForm : Form
             Text = "INSTALLATION",
             ForeColor = Color.FromArgb(202, 169, 160),
             Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold),
-            Padding = new Padding(0, 1, 0, 0)
+            Padding = new Padding(0, 1, 0, 0),
+            Margin = Padding.Empty,
+            Anchor = AnchorStyles.Left
         };
-        layout.Controls.Add(sectionTitle, 0, 0);
+
+        var titleRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            BackColor = Surface
+        };
+        titleRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        titleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        titleRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        titleRow.Controls.Add(sectionTitle, 0, 0);
+
+        _installProgress.Dock = DockStyle.Fill;
+        _installProgress.Margin = new Padding(12, 0, 0, 0);
+        _installProgress.TrackColor = Color.FromArgb(70, 27, 33);
+        _installProgress.FillColor = AccentHover;
+        _installProgress.Value = 0d;
+        titleRow.Controls.Add(_installProgress, 1, 0);
+        layout.Controls.Add(titleRow, 0, 0);
 
         var targetRow = new TableLayoutPanel
         {
@@ -570,13 +597,16 @@ internal sealed class MainForm : Form
     private static bool StorageHasRecoveryArtifacts(string root) =>
         File.Exists(Path.Combine(root, "umm-state.json")) ||
         File.Exists(Path.Combine(root, "umm-transaction.json")) ||
+        File.Exists(Path.Combine(root, "umm-plus-state.json")) ||
+        File.Exists(Path.Combine(root, "umm-plus-transaction.json")) ||
+        File.Exists(Path.Combine(root, "mayhem-ubisoft-dual-transaction.json")) ||
         File.Exists(Path.Combine(root, "mayhem-forge-state.json")) ||
         File.Exists(Path.Combine(root, "mayhem-forge-transaction.json"));
 
     private static DateTime LatestStorageArtifactUtc(string root)
     {
         var latest = DateTime.MinValue;
-        foreach (var fileName in new[] { "umm-state.json", "umm-transaction.json", "mayhem-forge-state.json", "mayhem-forge-transaction.json" })
+        foreach (var fileName in new[] { "umm-state.json", "umm-transaction.json", "umm-plus-state.json", "umm-plus-transaction.json", "mayhem-ubisoft-dual-transaction.json", "mayhem-forge-state.json", "mayhem-forge-transaction.json" })
         {
             var path = Path.Combine(root, fileName);
             if (File.Exists(path))
@@ -615,6 +645,13 @@ internal sealed class MainForm : Form
     {
         BackupStorageMode.AppData => new ForgeLevel255Manager(AppDataStorageRoot(), Path.Combine(AppDataStorageRoot(), "Backups")),
         BackupStorageMode.Installer => new ForgeLevel255Manager(InstallerStorageRoot(), InstallerStorageRoot()),
+        _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown backup storage mode.")
+    };
+
+    private UbisoftDualExeManager CreateUbisoftManager(BackupStorageMode mode) => mode switch
+    {
+        BackupStorageMode.AppData => new UbisoftDualExeManager(_manifest, AppDataStorageRoot(), Path.Combine(AppDataStorageRoot(), "Backups")),
+        BackupStorageMode.Installer => new UbisoftDualExeManager(_manifest, InstallerStorageRoot(), InstallerStorageRoot()),
         _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown backup storage mode.")
     };
 
@@ -664,9 +701,11 @@ internal sealed class MainForm : Form
         {
             var nextEngine = CreateEngine(next);
             var nextForgeManager = CreateForgeManager(next);
+            var nextUbisoftManager = CreateUbisoftManager(next);
             _backupStorageMode = next;
             _engine = nextEngine;
             _forgeManager = nextForgeManager;
+            _ubisoftManager = nextUbisoftManager;
             UpdateBackupStoreVisual();
             InvalidateAnalysisAfterBackupStoreChange();
             Log($"Backup store: {_backupStorageMode}; vanilla backup root: {CurrentBackupDirectory()}");
@@ -798,17 +837,26 @@ internal sealed class MainForm : Form
         {
             var targetPath = _exePath.Text.Trim();
             var result = await _engine.VerifyAsync(targetPath);
+            var secondaryResult = await _ubisoftManager.VerifySecondaryAsync(_engine, targetPath, result.BuildId, result.IsPatched);
             var forgeResult = await _forgeManager.VerifyPairAsync(targetPath);
             Log(result.Status);
-            Log($"EXE SHA-256: {result.Sha256}; operations verified: {result.VerifiedOperationCount}");
+            Log($"Primary EXE SHA-256: {result.Sha256}; operations verified: {result.VerifiedOperationCount}");
             if (!string.IsNullOrWhiteSpace(result.BackupPath))
-                Log($"Original EXE backup: {result.BackupPath}");
+                Log($"Original primary EXE backup: {result.BackupPath}");
+            if (secondaryResult.Required)
+            {
+                Log(secondaryResult.Status);
+                if (!string.IsNullOrWhiteSpace(secondaryResult.Sha256))
+                    Log($"Ubisoft plus EXE SHA-256: {secondaryResult.Sha256}; operations verified: {secondaryResult.VerifiedOperationCount}");
+                if (!string.IsNullOrWhiteSpace(secondaryResult.BackupPath))
+                    Log($"Original Ubisoft plus EXE backup: {secondaryResult.BackupPath}");
+            }
             Log(forgeResult.Status);
             if (!string.IsNullOrWhiteSpace(forgeResult.Sha256))
                 Log($"Forge SHA-256: {forgeResult.Sha256}");
             if (!string.IsNullOrWhiteSpace(forgeResult.BackupPath))
                 Log($"Original Forge backup: {forgeResult.BackupPath}");
-            if (!result.IsValid || !forgeResult.IsValid)
+            if (!result.IsValid || !secondaryResult.IsValid || !forgeResult.IsValid)
                 MessageBox.Show("MAYHEM verification failed. Check the installer log for the exact EXE/Forge mismatch.", "Verify failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             await RefreshAnalysisCoreAsync();
         }
@@ -829,7 +877,10 @@ internal sealed class MainForm : Form
         {
             var targetPath = _exePath.Text.Trim();
             await _forgeManager.RecoverInterruptedAsync(targetPath, _engine);
+            await _ubisoftManager.RecoverInterruptedAsync(targetPath, _engine, _forgeManager);
             _analysis = await _engine.AnalyzeAsync(targetPath);
+            _secondaryAnalysis = await _ubisoftManager.AnalyzeSecondaryAsync(_engine, _analysis);
+            _secondaryPairValid = _secondaryAnalysis.IsValid;
             _buildValue.Text = _analysis.Build?.DisplayName ?? (_analysis.MatchesSavedPatchedState ? "MAYHEM patched" : "Unknown");
             _hashValue.Text = _analysis.Sha256.Length >= 12 ? _analysis.Sha256[..12] + "..." : _analysis.Sha256;
             _statusValue.Text = _analysis.Status;
@@ -837,15 +888,26 @@ internal sealed class MainForm : Form
             ValidatePublishedModuleSet(_analysis);
             var forgeResult = await _forgeManager.VerifyPairAsync(targetPath);
             _forgePairValid = forgeResult.IsValid;
-            if (!forgeResult.IsValid)
+            if (!_secondaryAnalysis.IsValid)
+            {
+                _statusValue.Text = _secondaryAnalysis.Status;
+                _statusValue.ForeColor = Color.FromArgb(227, 105, 105);
+            }
+            else if (!forgeResult.IsValid)
             {
                 _statusValue.Text = forgeResult.Status;
                 _statusValue.ForeColor = Color.FromArgb(227, 105, 105);
             }
             Log($"Analyzed: {_analysis.Path}");
-            Log($"EXE SHA-256: {_analysis.Sha256}");
+            Log($"Primary EXE SHA-256: {_analysis.Sha256}");
             Log($"PE timestamp: 0x{_analysis.PeTimestamp:X8}; size: {_analysis.Size:N0} bytes");
             Log(_analysis.Status);
+            if (_secondaryAnalysis.Required)
+            {
+                Log(_secondaryAnalysis.Status);
+                if (_secondaryAnalysis.Analysis is not null)
+                    Log($"Ubisoft plus EXE SHA-256: {_secondaryAnalysis.Analysis.Sha256}; PE timestamp: 0x{_secondaryAnalysis.Analysis.PeTimestamp:X8}; size: {_secondaryAnalysis.Analysis.Size:N0} bytes");
+            }
             Log(forgeResult.Status);
             if (!string.IsNullOrWhiteSpace(forgeResult.Sha256))
                 Log($"Forge SHA-256: {forgeResult.Sha256}");
@@ -853,7 +915,9 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             _analysis = null;
+            _secondaryAnalysis = null;
             _forgePairValid = false;
+            _secondaryPairValid = false;
             _buildValue.Text = "Error";
             _hashValue.Text = "-";
             _statusValue.Text = ex.Message;
@@ -893,11 +957,14 @@ internal sealed class MainForm : Form
         var missing = required.Where(x => !available.Contains(x)).ToList();
         if (missing.Count != 0)
             throw new InvalidDataException("Mercenary module manifest is incomplete: " + string.Join(", ", missing));
+
+        if (UbisoftDualExeManager.IsUbisoftPrimaryBuild(analysis.Build.Id))
+            _ubisoftManager.ValidatePublishedModuleSet(required);
     }
 
     private async Task ApplyAsync()
     {
-        if (_busy || _analysis?.Build is null) return;
+        if (_busy || _analysis?.Build is null || !_secondaryPairValid) return;
         var selection = CurrentSelection();
         var selected = ResolveCurrentPatchIds();
         if (selected.Count == 0) return;
@@ -910,7 +977,10 @@ internal sealed class MainForm : Form
         }
 
         var description = MercenaryPatchSelectionResolver.Describe(selection);
-        var prompt = $"Install the selected MAYHEM modules into the verified ACOdyssey.exe?{Environment.NewLine}{Environment.NewLine}{description}";
+        var targetDescription = _secondaryAnalysis?.Required == true
+            ? "the verified Ubisoft Connect executable pair (ACOdyssey.exe + ACOdyssey_plus.exe)"
+            : "the verified ACOdyssey.exe";
+        var prompt = $"Install the selected MAYHEM modules into {targetDescription}?{Environment.NewLine}{Environment.NewLine}{description}";
         if (MessageBox.Show(
                 this,
                 prompt,
@@ -920,27 +990,70 @@ internal sealed class MainForm : Form
                 MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             return;
 
+        var analyzedSize = _analysis.Size;
+        var analyzedTimestamp = _analysis.PeTimestamp;
+        var hadUbisoftPair = _secondaryAnalysis?.Required == true;
+        var requiresForge = ForgeLevel255Manager.RequiresExtendedStats(selected);
+        var installProgress = new Progress<double>(SetInstallProgress);
+        SetInstallProgress(0d);
         SetBusy(true);
         try
         {
             Log("Resolved selection: " + description);
             Log("Low-level patch variants: " + string.Join(", ", selected));
-            Log(ForgeLevel255Manager.RequiresExtendedStats(selected)
+            Log(hadUbisoftPair
+                ? "Ubisoft Connect target: both supported executables will be patched and restored as one managed pair."
+                : "Single-executable target detected.");
+            Log(requiresForge
                 ? "Preflight + EXE/Forge backup + staged 255-stat Forge reconstruction started."
                 : "Preflight + EXE backup started; Level Unlock Off requires exact vanilla Forge.");
-            var state = await _forgeManager.ApplyCoordinatedAsync(_engine, _analysis, selected);
-            var forgeResult = await _forgeManager.VerifyPairAsync(_analysis.Path);
-            if (!forgeResult.IsValid)
-                throw new InvalidDataException("Post-install Forge verification failed: " + forgeResult.Status);
+
+            var state = await _ubisoftManager.ApplyCoordinatedAsync(
+                _engine,
+                _forgeManager,
+                _analysis,
+                selected,
+                progress: installProgress);
+
+            // ApplyCoordinatedAsync returns only after the EXE transaction(s), Forge commit and
+            // their authoritative post-write verification have succeeded. Do not immediately
+            // re-read the same 3.26 GB Forge + backup again just to repaint the UI.
+            SetInstallProgress(1d);
             Log($"Installed: {string.Join(", ", state.AppliedPatchIds)}");
-            Log($"Patched EXE SHA-256: {state.PatchedSha256}");
-            Log($"Original EXE backup: {state.BackupPath}");
-            Log(forgeResult.Status);
-            if (!string.IsNullOrWhiteSpace(forgeResult.Sha256))
-                Log($"Forge SHA-256: {forgeResult.Sha256}");
-            if (!string.IsNullOrWhiteSpace(forgeResult.BackupPath))
-                Log($"Original Forge backup: {forgeResult.BackupPath}");
-            await RefreshAnalysisCoreAsync();
+            Log($"Patched primary EXE SHA-256: {state.PatchedSha256}");
+            Log($"Original primary EXE backup: {state.BackupPath}");
+            if (hadUbisoftPair)
+                Log("Verified patched Ubisoft sibling ACOdyssey_plus.exe and original backup during the coordinated transaction.");
+
+            if (requiresForge)
+            {
+                Log("Verified MAYHEM 1.2 extended-stat Forge during the coordinated commit.");
+                Log($"Forge SHA-256: {ForgeLevel255Manager.PatchedForgeSha256}");
+                Log($"Original Forge backup: {_forgeManager.ManagedVanillaBackupPath}");
+            }
+            else
+            {
+                Log("Verified exact vanilla Forge during the coordinated install.");
+                Log($"Forge SHA-256: {ForgeLevel255Manager.VanillaForgeSha256}");
+            }
+
+            _analysis = new TargetAnalysis(
+                state.GameExePath,
+                state.PatchedSha256,
+                analyzedSize,
+                analyzedTimestamp,
+                null,
+                true,
+                false,
+                "Known MAYHEM patched state.");
+            _forgePairValid = true;
+            _secondaryPairValid = true;
+            _buildValue.Text = "MAYHEM patched";
+            _hashValue.Text = state.PatchedSha256[..12] + "...";
+            _statusValue.Text = "Known MAYHEM patched state.";
+            _statusValue.ForeColor = Color.FromArgb(214, 205, 198);
+            UpdateFeatureControlState();
+            UpdateActionState();
         }
         catch (Exception ex)
         {
@@ -956,9 +1069,12 @@ internal sealed class MainForm : Form
     private async Task RestoreAsync()
     {
         if (_busy || _analysis is null) return;
+        var restoreTarget = _secondaryAnalysis?.Required == true
+            ? "the exact hash-verified vanilla Ubisoft executable pair and DataPC_patch_01.forge backups"
+            : "the exact hash-verified vanilla ACOdyssey.exe and DataPC_patch_01.forge backups";
         if (MessageBox.Show(
                 this,
-                "Restore the exact hash-verified vanilla ACOdyssey.exe and DataPC_patch_01.forge backups used by the installed MAYHEM configuration?",
+                $"Restore {restoreTarget} used by the installed MAYHEM configuration?",
                 "Restore vanilla",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,
@@ -968,11 +1084,17 @@ internal sealed class MainForm : Form
         SetBusy(true);
         try
         {
-            await _forgeManager.RestoreCoordinatedAsync(_engine, _analysis.Path);
+            await _ubisoftManager.RestoreCoordinatedAsync(_engine, _forgeManager, _analysis.Path);
+            var primaryResult = await _engine.VerifyAsync(_analysis.Path);
+            var secondaryResult = await _ubisoftManager.VerifySecondaryAsync(_engine, _analysis.Path, primaryResult.BuildId, primaryResult.IsPatched);
             var forgeResult = await _forgeManager.VerifyPairAsync(_analysis.Path);
-            if (!forgeResult.IsValid || forgeResult.IsPatched)
-                throw new InvalidDataException("Post-restore Forge verification failed: " + forgeResult.Status);
-            Log("Vanilla executable and Forge state restored and SHA-256 verified.");
+            if (!primaryResult.IsValid || primaryResult.IsPatched || !secondaryResult.IsValid || secondaryResult.IsPatched || !forgeResult.IsValid || forgeResult.IsPatched)
+                throw new InvalidDataException("Post-restore executable/Forge verification failed.");
+            Log(_secondaryAnalysis?.Required == true
+                ? "Both Ubisoft executables and Forge restored to exact vanilla identities and SHA-256 verified."
+                : "Vanilla executable and Forge state restored and SHA-256 verified.");
+            if (secondaryResult.Required)
+                Log(secondaryResult.Status);
             Log(forgeResult.Status);
             await RefreshAnalysisCoreAsync();
         }
@@ -991,7 +1113,10 @@ internal sealed class MainForm : Form
     {
         if (_busy) return;
         _analysis = null;
+        _secondaryAnalysis = null;
         _forgePairValid = false;
+        _secondaryPairValid = false;
+        SetInstallProgress(0d);
         _buildValue.Text = "Not analyzed";
         _hashValue.Text = "-";
         _statusValue.Text = "Target path changed. Analyze again.";
@@ -1004,7 +1129,10 @@ internal sealed class MainForm : Form
     {
         if (_busy) return;
         _analysis = null;
+        _secondaryAnalysis = null;
         _forgePairValid = false;
+        _secondaryPairValid = false;
+        SetInstallProgress(0d);
         _buildValue.Text = "Not analyzed";
         _hashValue.Text = "-";
         _statusValue.Text = $"Backup store: {_backupStorageMode}. Analyze again.";
@@ -1017,7 +1145,7 @@ internal sealed class MainForm : Form
     {
         var selectedCount = ResolveCurrentPatchIds().Count;
         _verifyButton.Enabled = !_busy && _analysis is not null;
-        _applyButton.Enabled = !_busy && _forgePairValid && _analysis?.Build is not null && _analysis.HasStateConflict == false && selectedCount > 0;
+        _applyButton.Enabled = !_busy && _forgePairValid && _secondaryPairValid && _analysis?.Build is not null && _analysis.HasStateConflict == false && selectedCount > 0;
         _restoreButton.Enabled = !_busy && _analysis is not null && _analysis.MatchesSavedPatchedState;
     }
 
@@ -1045,11 +1173,71 @@ internal sealed class MainForm : Form
         UpdateActionState();
     }
 
+    private void SetInstallProgress(double value)
+    {
+        var normalized = Math.Clamp(value, 0d, 1d);
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => _installProgress.Value = normalized);
+            return;
+        }
+        _installProgress.Value = normalized;
+    }
+
     private void Log(string text)
     {
         _log.AppendText($"[{DateTime.Now:HH:mm:ss}] {text}{Environment.NewLine}");
         _log.SelectionStart = _log.TextLength;
         _log.ScrollToCaret();
+    }
+
+    private sealed class ThinProgressLine : Control
+    {
+        private double _value;
+
+        public Color TrackColor { get; set; } = Color.FromArgb(70, 27, 33);
+        public Color FillColor { get; set; } = AccentHover;
+
+        public double Value
+        {
+            get => _value;
+            set
+            {
+                var normalized = Math.Clamp(value, 0d, 1d);
+                if (Math.Abs(_value - normalized) < 0.0001d)
+                    return;
+                _value = normalized;
+                Invalidate();
+            }
+        }
+
+        public ThinProgressLine()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+            BackColor = Surface;
+            TabStop = false;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (ClientSize.Width <= 0 || ClientSize.Height <= 0)
+                return;
+
+            const int lineHeight = 2;
+            var y = Math.Max(0, (ClientSize.Height - lineHeight) / 2);
+            using var trackBrush = new SolidBrush(TrackColor);
+            e.Graphics.FillRectangle(trackBrush, 0, y, ClientSize.Width, lineHeight);
+
+            var fillWidth = _value >= 1d
+                ? ClientSize.Width
+                : (int)Math.Floor(ClientSize.Width * _value);
+            if (fillWidth <= 0)
+                return;
+
+            using var fillBrush = new SolidBrush(FillColor);
+            e.Graphics.FillRectangle(fillBrush, 0, y, fillWidth, lineHeight);
+        }
     }
 
     private sealed class BorderedPanel : Panel

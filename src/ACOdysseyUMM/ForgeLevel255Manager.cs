@@ -118,22 +118,37 @@ internal sealed class ForgeLevel255Manager
         PatchEngine engine,
         TargetAnalysis analysis,
         IReadOnlyCollection<string> patchIds,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<double>? progress = null)
     {
+        progress?.Report(0d);
         var requiresForge = RequiresExtendedStats(patchIds);
         if (!requiresForge)
         {
-            await ValidateVanillaForgeWithoutManagedStateAsync(analysis.Path, cancellationToken);
-            return await engine.ApplyAsync(analysis, patchIds, cancellationToken);
+            await ValidateVanillaForgeWithoutManagedStateAsync(
+                analysis.Path,
+                cancellationToken,
+                ScaledProgress.Slice(progress, 0d, 0.72d));
+            progress?.Report(0.72d);
+            var state = await engine.ApplyAsync(analysis, patchIds, cancellationToken);
+            progress?.Report(1d);
+            return state;
         }
 
-        var prepared = await PrepareApplyAsync(analysis.Path, cancellationToken);
-        PatchState? exeState = null;
+        var prepared = await PrepareApplyAsync(
+            analysis.Path,
+            cancellationToken,
+            ScaledProgress.Slice(progress, 0d, 0.72d));
         try
         {
-            exeState = await engine.ApplyAsync(analysis, patchIds, cancellationToken);
+            var exeState = await engine.ApplyAsync(analysis, patchIds, cancellationToken);
+            progress?.Report(0.80d);
             await UpdateTransactionPhaseAsync("ExeCommitted", cancellationToken);
-            await CommitPreparedApplyAsync(prepared, cancellationToken);
+            await CommitPreparedApplyAsync(
+                prepared,
+                cancellationToken,
+                ScaledProgress.Slice(progress, 0.80d, 1d));
+            progress?.Report(1d);
             return exeState;
         }
         catch (Exception originalError)
@@ -151,6 +166,10 @@ internal sealed class ForgeLevel255Manager
             }
 
             throw;
+        }
+        finally
+        {
+            prepared.Dispose();
         }
     }
 
@@ -266,7 +285,7 @@ internal sealed class ForgeLevel255Manager
         if (forgeState is null)
         {
             var legacy = IsVanilla(identity)
-                ? "Level Unlock is active in the EXE, but the Forge stat-extension state is missing and the Forge is still vanilla. This is the MAYHEM 1.0 incomplete Level Unlock state; Restore Vanilla before installing 1.1."
+                ? "Level Unlock is active in the EXE, but the Forge stat-extension state is missing and the Forge is still vanilla. This is the MAYHEM 1.0 incomplete Level Unlock state; Restore Vanilla before installing 1.2."
                 : "Level Unlock is active in the EXE, but the Forge stat-extension state is missing.";
             return new ForgeVerifyResult(false, IsPatched(identity), forgePath, identity.Sha256, legacy, null);
         }
@@ -277,7 +296,7 @@ internal sealed class ForgeLevel255Manager
             if (!IsPatched(identity))
                 return new ForgeVerifyResult(false, false, forgePath, identity.Sha256, "Managed Forge hash does not match the exact MAYHEM 1.1 extended-stat Forge.", forgeState.BackupPath);
             await ValidateVanillaBackupAsync(forgeState.BackupPath, cancellationToken);
-            return new ForgeVerifyResult(true, true, forgePath, identity.Sha256, "Verified MAYHEM 1.1 extended-stat Forge and exact vanilla Forge backup.", forgeState.BackupPath);
+            return new ForgeVerifyResult(true, true, forgePath, identity.Sha256, "Verified MAYHEM 1.2 extended-stat Forge and exact vanilla Forge backup.", forgeState.BackupPath);
         }
         catch (Exception ex)
         {
@@ -285,7 +304,10 @@ internal sealed class ForgeLevel255Manager
         }
     }
 
-    private async Task<PreparedForgeApply> PrepareApplyAsync(string exePath, CancellationToken cancellationToken)
+    private async Task<PreparedForgeApply> PrepareApplyAsync(
+        string exePath,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null)
     {
         var fullExePath = Path.GetFullPath(exePath);
         var forgePath = ResolveForgePath(fullExePath);
@@ -294,30 +316,74 @@ internal sealed class ForgeLevel255Manager
         if (LoadTransaction() is not null)
             throw new InvalidOperationException("A MAYHEM Forge recovery transaction already exists. Analyze first so recovery can complete.");
 
-        await RequireIdentityAsync(forgePath, VanillaForgeSize, VanillaForgeSha256, "source Forge", cancellationToken);
-        ValidateEmbeddedDeltaIdentity();
-
-        var backupPath = BackupPath();
-        if (File.Exists(backupPath))
-        {
-            await ValidateVanillaBackupAsync(backupPath, cancellationToken);
-        }
-        else
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
-            EnsureFreeSpaceForFile(backupPath, VanillaForgeSize);
-            await CopyFileExactAsync(forgePath, backupPath, cancellationToken);
-            await ValidateVanillaBackupAsync(backupPath, cancellationToken);
-        }
-
+        FileStream? sourceLock = null;
+        FileStream? backupLock = null;
+        FileStream? stageLock = null;
         var stagePath = ApplyStagePath(forgePath);
-        EnsureUntrackedTempAbsent(stagePath);
-        EnsureFreeSpaceForFile(stagePath, PatchedForgeSize);
-
         try
         {
-            await ApplyEmbeddedDeltaAsync(forgePath, stagePath, cancellationToken);
-            await RequireIdentityAsync(stagePath, PatchedForgeSize, PatchedForgeSha256, "staged MAYHEM Forge", cancellationToken);
+            sourceLock = OpenReadLock(forgePath);
+            ValidateEmbeddedDeltaIdentity();
+
+            var backupPath = BackupPath();
+            if (File.Exists(backupPath))
+            {
+                var sourceIdentity = await GetIdentityAsync(
+                    sourceLock,
+                    cancellationToken,
+                    ScaledProgress.Slice(progress, 0d, 0.20d));
+                RequireIdentity(sourceIdentity, VanillaForgeSize, VanillaForgeSha256, "source Forge");
+                await ValidateVanillaBackupAsync(
+                    backupPath,
+                    cancellationToken,
+                    ScaledProgress.Slice(progress, 0.20d, 0.35d));
+            }
+            else
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
+                EnsureFreeSpaceForFile(backupPath, VanillaForgeSize);
+                var tempBackupPath = backupPath + ".tmp";
+                EnsureUntrackedTempAbsent(tempBackupPath);
+                try
+                {
+                    var sourceIdentity = await CopyLockedSourceAndHashAsync(
+                        sourceLock,
+                        tempBackupPath,
+                        cancellationToken,
+                        ScaledProgress.Slice(progress, 0d, 0.20d));
+                    RequireIdentity(sourceIdentity, VanillaForgeSize, VanillaForgeSha256, "source Forge");
+                    await RequireIdentityAsync(
+                        tempBackupPath,
+                        VanillaForgeSize,
+                        VanillaForgeSha256,
+                        "staged vanilla Forge backup",
+                        cancellationToken,
+                        ScaledProgress.Slice(progress, 0.20d, 0.35d));
+                    File.Move(tempBackupPath, backupPath, overwrite: false);
+                }
+                finally
+                {
+                    DeleteExactFileIfExists(tempBackupPath);
+                }
+            }
+
+            backupLock = OpenReadLock(backupPath);
+
+            EnsureUntrackedTempAbsent(stagePath);
+            EnsureFreeSpaceForFile(stagePath, PatchedForgeSize);
+            await ApplyEmbeddedDeltaAsync(
+                sourceLock,
+                stagePath,
+                cancellationToken,
+                ScaledProgress.Slice(progress, 0.35d, 0.80d));
+            await RequireIdentityAsync(
+                stagePath,
+                PatchedForgeSize,
+                PatchedForgeSha256,
+                "staged MAYHEM Forge",
+                cancellationToken,
+                ScaledProgress.Slice(progress, 0.80d, 0.95d));
+            stageLock = OpenReadLock(stagePath);
 
             var tx = new ForgeLevel255Transaction
             {
@@ -331,24 +397,52 @@ internal sealed class ForgeLevel255Manager
                 StartedAtUtc = DateTimeOffset.UtcNow
             };
             await SaveTransactionAsync(tx, cancellationToken);
-            return new PreparedForgeApply(fullExePath, forgePath, backupPath, stagePath);
+            progress?.Report(1d);
+            return new PreparedForgeApply(
+                fullExePath,
+                forgePath,
+                backupPath,
+                stagePath,
+                sourceLock,
+                backupLock,
+                stageLock);
         }
         catch
         {
+            stageLock?.Dispose();
+            backupLock?.Dispose();
+            sourceLock?.Dispose();
             DeleteExactFileIfExists(stagePath);
             throw;
         }
     }
 
-    private async Task CommitPreparedApplyAsync(PreparedForgeApply prepared, CancellationToken cancellationToken)
+    private async Task CommitPreparedApplyAsync(
+        PreparedForgeApply prepared,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null)
     {
-        await RequireIdentityAsync(prepared.ForgePath, VanillaForgeSize, VanillaForgeSha256, "live pre-commit Forge", cancellationToken);
-        await RequireIdentityAsync(prepared.StagePath, PatchedForgeSize, PatchedForgeSha256, "staged MAYHEM Forge", cancellationToken);
-        await ValidateVanillaBackupAsync(prepared.BackupPath, cancellationToken);
+        // The source, backup and stage were already hash-verified in PrepareApplyAsync and are
+        // held under read locks across the EXE patch phase. That preserves immutability without
+        // re-reading the same multi-gigabyte files before commit.
         await UpdateTransactionPhaseAsync("ForgeCommitStarted", cancellationToken);
+        progress?.Report(0.05d);
 
+        // File.Replace needs the live source and stage handles released. No await occurs between
+        // releasing those two locks and the atomic replace call.
+        prepared.ReleaseForCommit();
         File.Replace(prepared.StagePath, prepared.ForgePath, null, ignoreMetadataErrors: true);
-        await RequireIdentityAsync(prepared.ForgePath, PatchedForgeSize, PatchedForgeSha256, "live MAYHEM Forge", cancellationToken);
+        progress?.Report(0.10d);
+
+        // One final full read-back of the committed live Forge is retained as the authoritative
+        // post-write proof. Failure here rolls back from the already verified backup.
+        await RequireIdentityAsync(
+            prepared.ForgePath,
+            PatchedForgeSize,
+            PatchedForgeSha256,
+            "live MAYHEM Forge",
+            cancellationToken,
+            ScaledProgress.Slice(progress, 0.10d, 0.95d));
 
         var state = new ForgeLevel255State
         {
@@ -362,6 +456,7 @@ internal sealed class ForgeLevel255Manager
         };
         await SaveStateAsync(state, cancellationToken);
         DeleteExactFileIfExists(_transactionPath);
+        progress?.Report(1d);
     }
 
     private async Task RollBackApplyAsync(
@@ -370,6 +465,7 @@ internal sealed class ForgeLevel255Manager
         string exePath,
         CancellationToken cancellationToken)
     {
+        prepared.Dispose();
         var identity = await GetIdentityAsync(prepared.ForgePath, cancellationToken);
         if (!IsVanilla(identity))
         {
@@ -386,12 +482,21 @@ internal sealed class ForgeLevel255Manager
         DeleteExactFileIfExists(_transactionPath);
     }
 
-    private async Task ValidateVanillaForgeWithoutManagedStateAsync(string exePath, CancellationToken cancellationToken)
+    private async Task ValidateVanillaForgeWithoutManagedStateAsync(
+        string exePath,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null)
     {
         if (LoadState() is not null || LoadTransaction() is not null)
             throw new InvalidOperationException("A MAYHEM Forge state exists. Restore Vanilla before installing a Level Unlock Off configuration.");
         var forgePath = ResolveForgePath(Path.GetFullPath(exePath));
-        await RequireIdentityAsync(forgePath, VanillaForgeSize, VanillaForgeSha256, "vanilla Forge for Level Unlock Off", cancellationToken);
+        await RequireIdentityAsync(
+            forgePath,
+            VanillaForgeSize,
+            VanillaForgeSha256,
+            "vanilla Forge for Level Unlock Off",
+            cancellationToken,
+            progress);
     }
 
     private async Task RestoreForgeFromBackupAsync(string forgePath, string backupPath, CancellationToken cancellationToken)
@@ -414,7 +519,11 @@ internal sealed class ForgeLevel255Manager
         }
     }
 
-    private async Task ApplyEmbeddedDeltaAsync(string sourcePath, string outputPath, CancellationToken cancellationToken)
+    private async Task ApplyEmbeddedDeltaAsync(
+        FileStream source,
+        string outputPath,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null)
     {
         var compressed = ReadVerifiedDeltaBytes();
         using var compressedStream = new MemoryStream(compressed, writable: false);
@@ -439,43 +548,58 @@ internal sealed class ForgeLevel255Manager
             commandCount <= 0 || commandCount > 10_000_000)
             throw new InvalidDataException("Embedded Forge delta header does not match MAYHEM 1.1 constants.");
 
-        await RequireIdentityAsync(sourcePath, VanillaForgeSize, VanillaForgeSha256, "delta source Forge", cancellationToken);
+        if (source.Length != VanillaForgeSize)
+            throw new InvalidDataException("Locked Forge source size changed unexpectedly.");
 
-        await using (var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.RandomAccess))
-        await using (var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+        await using var output = new FileStream(
+            outputPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var buffer = new byte[1024 * 1024];
+        long written = 0;
+        void ReportBytes(int count)
         {
-            var buffer = new byte[1024 * 1024];
-            for (long i = 0; i < commandCount; i++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var type = reader.ReadByte();
-                switch (type)
-                {
-                    case 0:
-                    {
-                        var offset = reader.ReadInt64();
-                        var length = reader.ReadInt64();
-                        if (offset < 0 || length < 0 || offset > VanillaForgeSize - length)
-                            throw new InvalidDataException($"Invalid embedded Forge COPY command {i}.");
-                        source.Position = offset;
-                        await CopyExactAsync(source, output, length, buffer, cancellationToken);
-                        break;
-                    }
-                    case 1:
-                    {
-                        var length = reader.ReadInt64();
-                        if (length < 0 || length > PatchedForgeSize)
-                            throw new InvalidDataException($"Invalid embedded Forge LITERAL command {i}.");
-                        await CopyExactAsync(patchStream, output, length, buffer, cancellationToken);
-                        break;
-                    }
-                    default:
-                        throw new InvalidDataException($"Unknown embedded Forge command type {type} at {i}.");
-                }
-            }
-            await output.FlushAsync(cancellationToken);
-            output.Flush(flushToDisk: true);
+            written += count;
+            progress?.Report(Math.Clamp(written / (double)PatchedForgeSize, 0d, 1d));
         }
+
+        for (long i = 0; i < commandCount; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var type = reader.ReadByte();
+            switch (type)
+            {
+                case 0:
+                {
+                    var offset = reader.ReadInt64();
+                    var length = reader.ReadInt64();
+                    if (offset < 0 || length < 0 || offset > VanillaForgeSize - length)
+                        throw new InvalidDataException($"Invalid embedded Forge COPY command {i}.");
+                    source.Position = offset;
+                    await CopyExactAsync(source, output, length, buffer, cancellationToken, ReportBytes);
+                    break;
+                }
+                case 1:
+                {
+                    var length = reader.ReadInt64();
+                    if (length < 0 || length > PatchedForgeSize)
+                        throw new InvalidDataException($"Invalid embedded Forge LITERAL command {i}.");
+                    await CopyExactAsync(patchStream, output, length, buffer, cancellationToken, ReportBytes);
+                    break;
+                }
+                default:
+                    throw new InvalidDataException($"Unknown embedded Forge command type {type} at {i}.");
+            }
+        }
+
+        if (written != PatchedForgeSize)
+            throw new InvalidDataException($"Embedded Forge delta produced {written:N0} bytes; expected {PatchedForgeSize:N0}.");
+        await output.FlushAsync(cancellationToken);
+        output.Flush(flushToDisk: true);
+        progress?.Report(1d);
     }
 
     private byte[] ReadVerifiedDeltaBytes()
@@ -502,25 +626,117 @@ internal sealed class ForgeLevel255Manager
     private static string ApplyStagePath(string forgePath) => forgePath + ".mayhem.level255.stage.tmp";
     private static string RestoreStagePath(string forgePath) => forgePath + ".mayhem.level255.restore.tmp";
 
-    private async Task ValidateVanillaBackupAsync(string backupPath, CancellationToken cancellationToken) =>
-        await RequireIdentityAsync(backupPath, VanillaForgeSize, VanillaForgeSha256, "vanilla Forge backup", cancellationToken);
+    public string ManagedVanillaBackupPath => BackupPath();
 
-    private async Task RequireIdentityAsync(string path, long expectedSize, string expectedSha, string label, CancellationToken cancellationToken)
+    private async Task ValidateVanillaBackupAsync(
+        string backupPath,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null) =>
+        await RequireIdentityAsync(
+            backupPath,
+            VanillaForgeSize,
+            VanillaForgeSha256,
+            "vanilla Forge backup",
+            cancellationToken,
+            progress);
+
+    private async Task RequireIdentityAsync(
+        string path,
+        long expectedSize,
+        string expectedSha,
+        string label,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null)
     {
-        var identity = await GetIdentityAsync(path, cancellationToken);
+        var identity = await GetIdentityAsync(path, cancellationToken, progress);
+        RequireIdentity(identity, expectedSize, expectedSha, label);
+    }
+
+    private static void RequireIdentity(FileIdentity identity, long expectedSize, string expectedSha, string label)
+    {
         if (identity.Size != expectedSize || !string.Equals(identity.Sha256, expectedSha, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"{label} identity mismatch. Expected {expectedSize} bytes / {expectedSha}, got {identity.Size} bytes / {identity.Sha256 ?? "<missing>"}.");
     }
 
-    private static async Task<FileIdentity> GetIdentityAsync(string path, CancellationToken cancellationToken)
+    private static FileStream OpenReadLock(string path) =>
+        new(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            4 * 1024 * 1024,
+            FileOptions.Asynchronous);
+
+    private static async Task<FileIdentity> GetIdentityAsync(
+        string path,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null)
     {
         if (!File.Exists(path))
             return new FileIdentity(-1, null);
-        var info = new FileInfo(path);
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4 * 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        using var sha = SHA256.Create();
-        var hash = await sha.ComputeHashAsync(stream, cancellationToken);
-        return new FileIdentity(info.Length, Convert.ToHexString(hash));
+        await using var stream = OpenReadLock(path);
+        return await GetIdentityAsync(stream, cancellationToken, progress);
+    }
+
+    private static async Task<FileIdentity> GetIdentityAsync(
+        FileStream stream,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null)
+    {
+        stream.Position = 0;
+        var length = stream.Length;
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[4 * 1024 * 1024];
+        long readTotal = 0;
+        while (readTotal < length)
+        {
+            var wanted = (int)Math.Min(buffer.Length, length - readTotal);
+            var read = await stream.ReadAsync(buffer.AsMemory(0, wanted), cancellationToken);
+            if (read <= 0)
+                throw new EndOfStreamException($"Unexpected EOF while hashing Forge at {readTotal:N0}/{length:N0} bytes.");
+            hash.AppendData(buffer, 0, read);
+            readTotal += read;
+            progress?.Report(length == 0 ? 1d : readTotal / (double)length);
+        }
+        stream.Position = 0;
+        progress?.Report(1d);
+        return new FileIdentity(length, Convert.ToHexString(hash.GetHashAndReset()));
+    }
+
+    private static async Task<FileIdentity> CopyLockedSourceAndHashAsync(
+        FileStream source,
+        string destinationPath,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null)
+    {
+        source.Position = 0;
+        var length = source.Length;
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        await using var destination = new FileStream(
+            destinationPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            4 * 1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.WriteThrough);
+        var buffer = new byte[4 * 1024 * 1024];
+        long copied = 0;
+        while (copied < length)
+        {
+            var wanted = (int)Math.Min(buffer.Length, length - copied);
+            var read = await source.ReadAsync(buffer.AsMemory(0, wanted), cancellationToken);
+            if (read <= 0)
+                throw new EndOfStreamException($"Unexpected EOF while copying Forge backup at {copied:N0}/{length:N0} bytes.");
+            hash.AppendData(buffer, 0, read);
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+            copied += read;
+            progress?.Report(length == 0 ? 1d : copied / (double)length);
+        }
+        await destination.FlushAsync(cancellationToken);
+        destination.Flush(flushToDisk: true);
+        source.Position = 0;
+        progress?.Report(1d);
+        return new FileIdentity(length, Convert.ToHexString(hash.GetHashAndReset()));
     }
 
     private static bool IsVanilla(FileIdentity identity) =>
@@ -529,16 +745,38 @@ internal sealed class ForgeLevel255Manager
     private static bool IsPatched(FileIdentity identity) =>
         identity.Size == PatchedForgeSize && string.Equals(identity.Sha256, PatchedForgeSha256, StringComparison.OrdinalIgnoreCase);
 
-    private static async Task CopyFileExactAsync(string sourcePath, string destinationPath, CancellationToken cancellationToken)
+    private static async Task CopyFileExactAsync(
+        string sourcePath,
+        string destinationPath,
+        CancellationToken cancellationToken,
+        IProgress<double>? progress = null)
     {
         await using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4 * 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        await using var destination = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4 * 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        await source.CopyToAsync(destination, 4 * 1024 * 1024, cancellationToken);
+        await using var destination = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4 * 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.WriteThrough);
+        var buffer = new byte[4 * 1024 * 1024];
+        long copied = 0;
+        while (copied < source.Length)
+        {
+            var wanted = (int)Math.Min(buffer.Length, source.Length - copied);
+            var read = await source.ReadAsync(buffer.AsMemory(0, wanted), cancellationToken);
+            if (read <= 0)
+                throw new EndOfStreamException($"Unexpected EOF while copying file at {copied:N0}/{source.Length:N0} bytes.");
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+            copied += read;
+            progress?.Report(source.Length == 0 ? 1d : copied / (double)source.Length);
+        }
         await destination.FlushAsync(cancellationToken);
         destination.Flush(flushToDisk: true);
+        progress?.Report(1d);
     }
 
-    private static async Task CopyExactAsync(Stream source, Stream destination, long length, byte[] buffer, CancellationToken cancellationToken)
+    private static async Task CopyExactAsync(
+        Stream source,
+        Stream destination,
+        long length,
+        byte[] buffer,
+        CancellationToken cancellationToken,
+        Action<int>? bytesCopied = null)
     {
         var remaining = length;
         while (remaining > 0)
@@ -549,6 +787,7 @@ internal sealed class ForgeLevel255Manager
                 throw new EndOfStreamException($"Unexpected EOF with {remaining} bytes remaining.");
             await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
             remaining -= read;
+            bytesCopied?.Invoke(read);
         }
     }
 
@@ -666,7 +905,49 @@ internal sealed class ForgeLevel255Manager
             File.Delete(path);
     }
 
-    private sealed record PreparedForgeApply(string GameExePath, string ForgePath, string BackupPath, string StagePath);
+    private sealed class PreparedForgeApply : IDisposable
+    {
+        private FileStream? _sourceLock;
+        private FileStream? _backupLock;
+        private FileStream? _stageLock;
+
+        public PreparedForgeApply(
+            string gameExePath,
+            string forgePath,
+            string backupPath,
+            string stagePath,
+            FileStream sourceLock,
+            FileStream backupLock,
+            FileStream stageLock)
+        {
+            GameExePath = gameExePath;
+            ForgePath = forgePath;
+            BackupPath = backupPath;
+            StagePath = stagePath;
+            _sourceLock = sourceLock;
+            _backupLock = backupLock;
+            _stageLock = stageLock;
+        }
+
+        public string GameExePath { get; }
+        public string ForgePath { get; }
+        public string BackupPath { get; }
+        public string StagePath { get; }
+
+        public void ReleaseForCommit()
+        {
+            Interlocked.Exchange(ref _stageLock, null)?.Dispose();
+            Interlocked.Exchange(ref _sourceLock, null)?.Dispose();
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref _stageLock, null)?.Dispose();
+            Interlocked.Exchange(ref _sourceLock, null)?.Dispose();
+            Interlocked.Exchange(ref _backupLock, null)?.Dispose();
+        }
+    }
+
     private sealed record FileIdentity(long Size, string? Sha256);
 }
 

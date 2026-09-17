@@ -15,17 +15,28 @@ internal sealed class PatchEngine
     private readonly string _statePath;
     private readonly string _transactionPath;
     private readonly string _backupRoot;
+    private readonly string _expectedExeFileName;
 
-    public PatchEngine(PatchManifest manifest, string? dataRoot = null, string? backupRoot = null)
+    public PatchEngine(
+        PatchManifest manifest,
+        string? dataRoot = null,
+        string? backupRoot = null,
+        string expectedExeFileName = "ACOdyssey.exe",
+        string stateFileName = "umm-state.json",
+        string transactionFileName = "umm-transaction.json")
     {
         ValidateManifest(manifest);
+        ValidateManagedLeafName(expectedExeFileName, nameof(expectedExeFileName));
+        ValidateManagedLeafName(stateFileName, nameof(stateFileName));
+        ValidateManagedLeafName(transactionFileName, nameof(transactionFileName));
         _manifest = manifest;
+        _expectedExeFileName = expectedExeFileName;
 
         dataRoot ??= Path.Combine(AppContext.BaseDirectory, "Data");
         dataRoot = Path.GetFullPath(dataRoot);
         backupRoot = Path.GetFullPath(backupRoot ?? Path.Combine(dataRoot, "Backups"));
-        _statePath = Path.Combine(dataRoot, "umm-state.json");
-        _transactionPath = Path.Combine(dataRoot, "umm-transaction.json");
+        _statePath = Path.Combine(dataRoot, stateFileName);
+        _transactionPath = Path.Combine(dataRoot, transactionFileName);
         _backupRoot = backupRoot;
     }
 
@@ -117,19 +128,33 @@ internal sealed class PatchEngine
         return new PatchVerifyResult(fullPath, "Verified AC Odyssey UMM patched executable and original backup.", true, true, state.BuildId, sha, operations.Count, state.BackupPath);
     }
 
-    public IReadOnlyList<PatchDefinition> GetApplicablePatches(TargetAnalysis analysis)
+    public string? GetEffectiveBuildId(TargetAnalysis analysis)
     {
         if (analysis.HasStateConflict)
-            return [];
+            return null;
+        if (analysis.Build is not null)
+            return analysis.Build.Id;
+        if (!analysis.MatchesSavedPatchedState)
+            return null;
 
-        var buildId = analysis.Build?.Id;
-        if (buildId is null && analysis.MatchesSavedPatchedState)
-        {
-            var state = LoadState();
-            if (state is not null && PathsEqual(state.GameExePath, analysis.Path))
-                buildId = state.BuildId;
-        }
+        var state = LoadState();
+        return state is not null && PathsEqual(state.GameExePath, analysis.Path)
+            ? state.BuildId
+            : null;
+    }
 
+    public IReadOnlyList<string> GetAppliedPatchIdsForPath(string exePath)
+    {
+        var fullPath = Path.GetFullPath(exePath);
+        var state = LoadState();
+        return state is not null && PathsEqual(state.GameExePath, fullPath)
+            ? state.AppliedPatchIds.OrderBy(x => x, StringComparer.Ordinal).ToList()
+            : [];
+    }
+
+    public IReadOnlyList<PatchDefinition> GetApplicablePatches(TargetAnalysis analysis)
+    {
+        var buildId = GetEffectiveBuildId(analysis);
         if (buildId is null)
             return [];
 
@@ -575,7 +600,7 @@ internal sealed class PatchEngine
     {
         var dir = Path.Combine(_backupRoot, analysis.Build!.Id, analysis.Sha256);
         Directory.CreateDirectory(dir);
-        var backupPath = Path.Combine(dir, "ACOdyssey.exe");
+        var backupPath = Path.Combine(dir, _expectedExeFileName);
 
         if (File.Exists(backupPath))
         {
@@ -866,8 +891,8 @@ internal sealed class PatchEngine
             throw new InvalidDataException("Patch state references an unknown or mismatched build.");
         if (!IsSha256(state.OriginalSha256) || !IsSha256(state.PatchedSha256))
             throw new InvalidDataException("Patch state contains an invalid SHA-256 value.");
-        if (string.IsNullOrWhiteSpace(state.GameExePath) || !string.Equals(Path.GetFileName(state.GameExePath), "ACOdyssey.exe", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("Patch state contains an invalid game executable path.");
+        if (string.IsNullOrWhiteSpace(state.GameExePath) || !string.Equals(Path.GetFileName(state.GameExePath), _expectedExeFileName, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Patch state contains an invalid game executable path for {_expectedExeFileName}.");
 
         var expectedBackupPath = GetExpectedBackupPath(state.BuildId, state.OriginalSha256);
         if (string.IsNullOrWhiteSpace(state.BackupPath) || !PathsEqual(expectedBackupPath, state.BackupPath))
@@ -906,8 +931,8 @@ internal sealed class PatchEngine
             throw new InvalidDataException("Transaction journal references an unknown or mismatched build.");
         if (!IsSha256(transaction.OriginalSha256) || !IsSha256(transaction.PatchedSha256))
             throw new InvalidDataException("Transaction journal contains an invalid SHA-256 value.");
-        if (string.IsNullOrWhiteSpace(transaction.GameExePath) || !string.Equals(Path.GetFileName(transaction.GameExePath), "ACOdyssey.exe", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("Transaction journal contains an invalid game executable path.");
+        if (string.IsNullOrWhiteSpace(transaction.GameExePath) || !string.Equals(Path.GetFileName(transaction.GameExePath), _expectedExeFileName, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Transaction journal contains an invalid game executable path for {_expectedExeFileName}.");
 
         var expectedBackupPath = GetExpectedBackupPath(transaction.BuildId, transaction.OriginalSha256);
         if (!PathsEqual(expectedBackupPath, transaction.BackupPath))
@@ -991,7 +1016,7 @@ internal sealed class PatchEngine
             .SequenceEqual(transaction.AppliedPatchIds.OrderBy(x => x, StringComparer.Ordinal), StringComparer.Ordinal);
 
     private string GetExpectedBackupPath(string buildId, string originalSha256) =>
-        Path.Combine(_backupRoot, buildId, originalSha256, "ACOdyssey.exe");
+        Path.Combine(_backupRoot, buildId, originalSha256, _expectedExeFileName);
 
     private static void ReplaceFilePreservingReadOnly(string sourcePath, string destinationPath, string? backupPath)
     {
@@ -1117,22 +1142,33 @@ internal sealed class PatchEngine
             Path.GetFullPath(b).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
             StringComparison.OrdinalIgnoreCase);
 
-    private static void ValidateExePath(string path)
+    private void ValidateExePath(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-            throw new FileNotFoundException("ACOdyssey.exe was not found.", path);
-        if (!string.Equals(Path.GetFileName(path), "ACOdyssey.exe", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Select ACOdyssey.exe.");
+            throw new FileNotFoundException($"{_expectedExeFileName} was not found.", path);
+        if (!string.Equals(Path.GetFileName(path), _expectedExeFileName, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Select {_expectedExeFileName}.");
+    }
+
+    private static void ValidateManagedLeafName(string value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value) ||
+            !string.Equals(Path.GetFileName(value), value, StringComparison.Ordinal) ||
+            value.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            throw new ArgumentException("Managed file names must be plain leaf names without path components.", parameterName);
+        }
     }
 
     private static void EnsureGameNotRunning()
     {
-        Process[] processes = [];
+        var processes = new List<Process>();
         try
         {
-            processes = Process.GetProcessesByName("ACOdyssey");
-            if (processes.Length != 0)
-                throw new InvalidOperationException("ACOdyssey.exe is running. Close the game before applying or restoring patches.");
+            processes.AddRange(Process.GetProcessesByName("ACOdyssey"));
+            processes.AddRange(Process.GetProcessesByName("ACOdyssey_plus"));
+            if (processes.Count != 0)
+                throw new InvalidOperationException("Assassin's Creed Odyssey is running. Close the game before applying or restoring patches.");
         }
         finally
         {

@@ -80,6 +80,17 @@ internal sealed class PatchTransaction
     public DateTimeOffset StartedAtUtc { get; init; }
 }
 
+internal sealed class UbisoftDualTransaction
+{
+    public int SchemaVersion { get; init; } = 1;
+    public required string Operation { get; init; }
+    public required string Phase { get; set; }
+    public required string PrimaryExePath { get; init; }
+    public required string PlusExePath { get; init; }
+    public List<string> AppliedPatchIds { get; init; } = [];
+    public DateTimeOffset StartedAtUtc { get; init; }
+}
+
 internal sealed record TargetAnalysis(
     string Path,
     string Sha256,
@@ -111,5 +122,6 @@ internal sealed record PatchVerifyResult(
 [JsonSerializable(typeof(PatchManifest))]
 [JsonSerializable(typeof(PatchState))]
 [JsonSerializable(typeof(PatchTransaction))]
+[JsonSerializable(typeof(UbisoftDualTransaction))]
 [JsonSerializable(typeof(BackupMetadata))]
 internal partial class AppJsonContext : JsonSerializerContext;
